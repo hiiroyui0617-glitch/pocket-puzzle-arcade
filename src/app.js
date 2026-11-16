@@ -1,6 +1,7 @@
 import { generateSudoku, findConflicts, sudokuComplete } from './sudoku.js';
 import { applyGate, formatNumber, generateGates, runGate } from './gates.js';
-import { GRID, newBlockState, placePiece, fits, canPlaceAnywhere } from './blocks.js';
+import { GRID, newBlockState, placePiece, fits } from './blocks.js';
+import { positionForDrag, snapToBoard } from './block-drag.js';
 import { loadData, saveData } from './storage.js';
 
 let data = loadData();
@@ -11,6 +12,7 @@ let selectedPiece = 0;
 let toastTimer = 0;
 let audio = null;
 let blockDrag = null;
+let suppressPieceClick = false;
 const $ = selector => document.querySelector(selector);
 const app = $('#app');
 const esc = value => String(value).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
@@ -38,6 +40,7 @@ function tone(freq = 540, length = .08) {
   } catch { /* Audio is optional */ }
 }
 function openPage(next) {
+  clearBlockDrag();
   page = next;
   if (next === 'sudoku' && !data.sudoku) newSudoku('normal', false);
   if (next === 'gates' && !data.gates) newGates(false);
@@ -226,10 +229,10 @@ function blocksContent() {
   return `${gameHeading('ブロックパズル','ピースを盤面に置いて、縦または横の8マスを揃えよう。')}
   <div class="game-layout"><div class="section-panel game-main"><div class="stats-row"><div class="stat-box"><div class="stat-heading">スコア</div><div class="stat-value">${s.score.toLocaleString('ja-JP')}</div></div><div class="stat-box"><div class="stat-heading">最高記録</div><div class="stat-value">${data.stats.blocksBest.toLocaleString('ja-JP')}</div></div><div class="stat-box"><div class="stat-heading">コンボ</div><div class="stat-value">${s.combo ? `${s.combo} ×`:'—'}</div></div></div>
   <div class="blocks-board" role="grid" aria-label="8×8のブロック盤面">${s.board.map((n,i)=>`<button class="block-cell ${n?`filled c${n}`:''}" data-block-cell="${i}" role="gridcell" aria-label="${Math.floor(i/8)+1}行${i%8+1}列 ${n?'埋まっている':'空欄'}" ${s.over?'disabled':''}></button>`).join('')}</div>
-  <p class="help" style="text-align:center">① 下のピースを選択 → ② 盤面の置きたい位置をタップ（ドラッグでも配置できます）</p>
+  <p class="help" style="text-align:center">下のブロックを押したまま盤面へ動かし、置きたい位置で離してください。<br>緑のマスは配置可能、赤のマスは配置不可です。<br>ピースを選択して盤面をタップする操作も使えます。</p>
   <div class="piece-tray">${s.pieces.map((piece,i)=>`<button class="piece-slot ${!piece?'empty':''} ${selectedPiece===i?'active':''}" data-piece="${i}" aria-label="ピース ${i+1}${piece?' を選択':' 配置済み'}" aria-pressed="${selectedPiece===i}" ${!piece||s.over?'disabled':''}><span class="slot-number">0${i+1}</span>${miniature(piece)}</button>`).join('')}</div>
   ${s.over?`<div class="game-over"><strong>GAME OVER</strong><p>置けるピースがなくなりました。スコア ${s.score.toLocaleString('ja-JP')} pt</p><button id="blocks-again" class="primary-button">もう一度遊ぶ →</button></div>`:''}
-  </div><aside class="game-sidebar"><div class="section-panel"><h2 class="note-title">遊び方</h2><p class="help">① 3つのピースから1つ選びます。<br>② 盤面のマスをタップして配置します。<br>③ 縦か横を一列埋めると消去！<br>④ 3つ置くと次の3つが出ます。</p><p class="help"><strong>連続でラインを消すとコンボボーナス。</strong>どのピースも置けなくなったら終了です。</p><button class="secondary-button" id="blocks-restart">↻ 新しいゲーム</button></div><div class="stat-box span-full"><div class="stat-heading">配置回数</div><div class="stat-value">${s.moves} 回</div><p class="help">過去のゲーム終了回数：${data.stats.blocksGames} 回</p></div></aside></div>`;
+  </div><aside class="game-sidebar"><div class="section-panel"><h2 class="note-title">遊び方</h2><p class="help">① 下のブロックを指やマウスでドラッグします。<br>② 盤面に表示される配置プレビューを確認します。<br>③ 指を離して設置します。<br>④ 縦か横を一列埋めると消えます。3つ置くと次の3つが出ます。</p><p class="help"><strong>連続でラインを消すとコンボボーナス。</strong>どのピースも置けなくなったら終了です。</p><button class="secondary-button" id="blocks-restart">↻ 新しいゲーム</button></div><div class="stat-box span-full"><div class="stat-heading">配置回数</div><div class="stat-value">${s.moves} 回</div><p class="help">過去のゲーム終了回数：${data.stats.blocksGames} 回</p></div></aside></div>`;
 }
 
 function render() {
@@ -264,15 +267,24 @@ function bind() {
     document.querySelectorAll('[data-block-cell]').forEach(b=>{
       const i=Number(b.dataset.blockCell);
       b.addEventListener('click',()=>blockPlaceAt(i));
-      b.addEventListener('pointerenter',e=>{if(e.pointerType!=='touch')updateBlockPreview(i);});
+      b.addEventListener('pointerenter',e=>{if(!blockDrag && e.pointerType!=='touch')updateBlockPreview(i);});
     });
-    $('.blocks-board')?.addEventListener('pointerleave',()=>updateBlockPreview(-1));
+    $('.blocks-board')?.addEventListener('pointerleave',()=>{if(!blockDrag)updateBlockPreview(-1);});
     document.querySelectorAll('[data-piece]').forEach(b=>{
-      b.addEventListener('click',()=>{selectedPiece=Number(b.dataset.piece); render();});
+      b.addEventListener('click',e=>{
+        if(suppressPieceClick){suppressPieceClick=false;e.preventDefault();return;}
+        selectedPiece=Number(b.dataset.piece);render();
+      });
       b.addEventListener('pointerdown',e=>{
-        if (e.button!==0 && e.pointerType==='mouse')return;
-        blockDrag={index:Number(b.dataset.piece),x:e.clientX,y:e.clientY,moved:false};
-        selectedPiece=blockDrag.index;
+        if(e.pointerType==='mouse' && e.button!==0 || blockDrag || b.disabled)return;
+        suppressPieceClick=false;
+        const index=Number(b.dataset.piece);
+        if(!data.blocks.pieces[index])return;
+        selectedPiece=index;
+        blockDrag={pointerId:e.pointerId,index,source:b,startX:e.clientX,startY:e.clientY,
+          pointerType:e.pointerType,moved:false,ghost:null,hover:-1,valid:false};
+        // Keep receiving touch/pointer movements even after leaving the tray.
+        try{b.setPointerCapture(e.pointerId);}catch{/* browser fallback: document handlers */}
       });
     });
     $('#blocks-again')?.addEventListener('click',()=>newBlocks());
@@ -282,23 +294,76 @@ function bind() {
     });
   }
 }
-// Drag placement is supported in addition to the more reliable select-and-tap interaction.
-document.addEventListener('pointermove',e=>{
-  if (!blockDrag || page!=='blocks')return;
-  if(Math.hypot(e.clientX-blockDrag.x,e.clientY-blockDrag.y)>12)blockDrag.moved=true;
-  if(!blockDrag.moved)return;
-  const cell=document.elementFromPoint(e.clientX,e.clientY)?.closest('[data-block-cell]');
-  updateBlockPreview(cell?Number(cell.dataset.blockCell):-1);
-});
+// Drag a full-sized piece above the finger; snap its top-left corner to the 8x8 board.
+function makeBlockDragGhost(drag) {
+  const piece=data.blocks.pieces[drag.index];
+  const cells=piece.cells;
+  const cols=Math.max(...cells.map(([x])=>x))+1;
+  const rows=Math.max(...cells.map(([,y])=>y))+1;
+  const board=$('.blocks-board');
+  const first=board.querySelector('[data-block-cell="0"]').getBoundingClientRect();
+  const right=board.querySelector('[data-block-cell="1"]').getBoundingClientRect();
+  const below=board.querySelector('[data-block-cell="8"]').getBoundingClientRect();
+  const stepX=right.left-first.left,stepY=below.top-first.top;
+  const gapX=stepX-first.width,gapY=stepY-first.height;
+  const filled=new Set(cells.map(([x,y])=>`${x},${y}`));
+  const ghost=document.createElement('div');
+  ghost.className='block-drag-ghost';
+  ghost.style.gridTemplateColumns=`repeat(${cols}, ${first.width}px)`;
+  ghost.style.gridTemplateRows=`repeat(${rows}, ${first.height}px)`;
+  ghost.style.columnGap=`${gapX}px`;
+  ghost.style.rowGap=`${gapY}px`;
+  ghost.innerHTML=Array.from({length:cols*rows},(_,i)=>{
+    const visible=filled.has(`${i%cols},${Math.floor(i/cols)}`);
+    return `<span class="block-drag-cell ${visible?`filled c${piece.color}`:'blank'}"></span>`;
+  }).join('');
+  document.body.appendChild(ghost);
+  drag.source.classList.add('dragging');
+  document.body.classList.add('blocks-dragging');
+  drag.ghost=ghost;
+  drag.layout={cols,rows,stepX,stepY,gapX,gapY,firstX:first.left,firstY:first.top};
+  drag.lift=drag.pointerType==='touch'?78:drag.pointerType==='pen'?55:18;
+}
+function moveBlockDrag(e) {
+  const drag=blockDrag;
+  if(!drag || drag.pointerId!==e.pointerId || page!=='blocks')return;
+  if(!drag.moved){
+    if(Math.hypot(e.clientX-drag.startX,e.clientY-drag.startY)<9)return;
+    drag.moved=true;
+    makeBlockDragGhost(drag);
+  }
+  const {cols,rows,stepX,stepY,gapX,gapY,firstX,firstY}=drag.layout;
+  const pos=positionForDrag(e.clientX,e.clientY,cols,rows,stepX,stepY,gapX,gapY,drag.lift);
+  drag.ghost.style.transform=`translate3d(${pos.left}px, ${pos.top}px, 0)`;
+  const hover=snapToBoard(pos.left,pos.top,firstX,firstY,stepX,stepY,GRID);
+  if(hover!==drag.hover){drag.hover=hover;updateBlockPreview(hover);}
+  drag.valid=hover>=0 && fits(data.blocks.board,data.blocks.pieces[drag.index],Math.floor(hover/GRID),hover%GRID);
+  drag.ghost.classList.toggle('can-drop',drag.valid);
+  drag.ghost.classList.toggle('cannot-drop',hover>=0 && !drag.valid);
+}
+function clearBlockDrag() {
+  if(!blockDrag)return;
+  const drag=blockDrag;
+  blockDrag=null;
+  drag.ghost?.remove();
+  drag.source.classList.remove('dragging');
+  document.body.classList.remove('blocks-dragging');
+  try{if(drag.source.hasPointerCapture?.(drag.pointerId))drag.source.releasePointerCapture(drag.pointerId);}catch{}
+  updateBlockPreview(-1);
+}
+document.addEventListener('pointermove',moveBlockDrag);
 document.addEventListener('pointerup',e=>{
-  if(!blockDrag||page!=='blocks')return;
-  const drag=blockDrag;blockDrag=null;
-  if(!drag.moved)return;
-  const cell=document.elementFromPoint(e.clientX,e.clientY)?.closest('[data-block-cell]');
-  if(cell){selectedPiece=drag.index;blockPlaceAt(Number(cell.dataset.blockCell));}
-  else {updateBlockPreview(-1);render();}
+  if(!blockDrag || blockDrag.pointerId!==e.pointerId)return;
+  moveBlockDrag(e); // The drop uses the actual release position.
+  const {moved,hover,valid,index}=blockDrag;
+  if(moved)suppressPieceClick=true;
+  clearBlockDrag();
+  if(!moved)return; // Keep tap-to-select for accessibility and PC users.
+  if(valid){selectedPiece=index;blockPlaceAt(hover);}
+  else if(hover>=0){tone(170,.1);toast('そこには置けません。別の位置で離してください');}
 });
-document.addEventListener('pointercancel',()=>{blockDrag=null;});
+document.addEventListener('pointercancel',e=>{if(blockDrag?.pointerId===e.pointerId)clearBlockDrag();});
+window.addEventListener('blur',clearBlockDrag);
 document.addEventListener('keydown',e=>{
   if(e.ctrlKey||e.altKey||e.metaKey||['SELECT','INPUT','TEXTAREA'].includes(document.activeElement?.tagName))return;
   if(page==='gates' && !data.gates?.finished && ['ArrowLeft','ArrowRight'].includes(e.key)) {e.preventDefault();chooseGate(e.key==='ArrowLeft'?0:1);return;}
