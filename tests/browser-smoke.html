@@ -1,0 +1,31 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8" /></head><body><iframe src="../index.html" width="400" height="700"></iframe><pre id="result">RUNNING</pre><script type="module">
+const result=document.querySelector('#result');const frame=document.querySelector('iframe');
+const delay = ms => new Promise(r=>setTimeout(r,ms));
+let passed=0;
+function expect(condition,reason){if(!condition)throw Error(reason);passed++;}
+try{
+  await new Promise((resolve,reject)=>{frame.addEventListener('load',resolve,{once:true});setTimeout(()=>reject(Error('Frame load timed out')),4500);});
+  const win=frame.contentWindow;
+  const doc=frame.contentDocument;
+  expect(!!doc.querySelector('.cards'),'Home cards missing');
+  expect(doc.querySelectorAll('.game-card').length===3,'Three cards not rendered');
+  doc.querySelector('[data-nav="sudoku"]').click();
+  expect(doc.querySelectorAll('.sudoku-cell').length===81,'Sudoku board missing');
+  doc.querySelector('.sudoku-cell:not(.given)').click();
+  doc.querySelector('[data-digit="1"]').click();
+  expect(!!doc.querySelector('#undo-sudoku'),'Sudoku toolbar missing');
+  doc.querySelector('#undo-sudoku').click();
+  doc.querySelector('[data-nav="gates"]').click();
+  expect(doc.querySelectorAll('.gate-option').length===2,'Gate choices missing');
+  doc.querySelector('[data-lane="0"]').click();
+  expect(doc.querySelectorAll('.history-step').length===1,'Gate choice not applied');
+  doc.querySelector('[data-nav="blocks"]').click();
+  expect(doc.querySelectorAll('.block-cell').length===64,'Block board missing');
+  const firstPiece=doc.querySelector('.piece-slot:not(:disabled)');
+  expect(!!firstPiece,'No block piece');
+  firstPiece.click();
+  doc.querySelector('[data-block-cell="0"]').click();
+  expect(doc.querySelector('.stats-row .stat-value').textContent!=='0','Block placement score not updated');
+  result.textContent=`PASS ${passed} browser assertions`;
+}catch(e){result.textContent=`FAIL after ${passed} assertions: ${e.stack||e.message}`;}
+</script></body></html>
